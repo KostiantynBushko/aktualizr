@@ -8,7 +8,36 @@
 #include "package_manager/ostreemanager.h"  // TODO: Hide behind PackageManagerInterface
 #endif
 #include "socket_server.h"
+#include "unordered_map"
+#include "uptane/fetcher.h"
 #include "utilities/utils.h"
+
+class SecondaryMetadataFetcher : public Uptane::IFetcher {
+ public:
+  SecondaryMetadataFetcher(const Uptane::RawMetaPack& meta_pack) {
+    director_metadata_ = {{Uptane::Role::ROOT, meta_pack.director_root},
+                          {Uptane::Role::TARGETS, meta_pack.director_targets}};
+
+    image_metadata_ = {
+        {Uptane::Role::ROOT, meta_pack.image_root},
+        {Uptane::Role::TIMESTAMP, meta_pack.image_timestamp},
+        {Uptane::Role::SNAPSHOT, meta_pack.image_snapshot},
+        {Uptane::Role::TARGETS, meta_pack.image_targets},
+    };
+  }
+
+  virtual bool fetchRole(std::string* result, int64_t maxsize, Uptane::RepositoryType repo, const Uptane::Role& role,
+                         Uptane::Version version);
+  virtual bool fetchLatestRole(std::string* result, int64_t maxsize, Uptane::RepositoryType repo,
+                               const Uptane::Role& role);
+
+ private:
+  bool getRoleMetadata(std::string* result, const Uptane::RepositoryType& repo, const Uptane::Role& role);
+
+ private:
+  std::unordered_map<std::string, std::string> director_metadata_;
+  std::unordered_map<std::string, std::string> image_metadata_;
+};
 
 class SecondaryAdapter : public Uptane::SecondaryInterface {
  public:
@@ -64,32 +93,52 @@ Json::Value AktualizrSecondary::getManifestResp() const {
 }
 
 bool AktualizrSecondary::putMetadataResp(const Uptane::RawMetaPack& meta_pack) {
-  TimeStamp now(TimeStamp::Now());
-  detected_attack_.clear();
+  /**
+   *  5.4.4.2. Full verification  https://uptane.github.io/uptane-standard/uptane-standard.html#metadata_verification
+   */
 
-  // TODO: proper partial verification
-  root_ = Uptane::Root(Uptane::RepositoryType::Director(), Utils::parseJSON(meta_pack.director_root), root_);
-  Uptane::Targets targets(Uptane::RepositoryType::Director(), Uptane::Role::Targets(),
-                          Utils::parseJSON(meta_pack.director_targets), std::make_shared<Uptane::Root>(root_));
-  if (meta_targets_.version() > targets.version()) {
-    detected_attack_ = "Rollback attack detected";
-    return true;
+  // 1. Load and verify the current time or the most recent securely attested time.
+  // We trust our time, In this ECU we trust :)
+
+  SecondaryMetadataFetcher metadataFetcher(meta_pack);
+
+  TimeStamp now(TimeStamp::Now());
+
+  // 2. Download and check the Root metadata file from the Director repository, following the procedure in
+  // Section 5.4.4.3. 5.4.4.3. How to check Root metadata Not supported: 3. Download and check the Timestamp metadata
+  // file from the Director repository, following the procedure in Section 5.4.4.4. Not supported: 4. Download and check
+  // the Snapshot metadata file from the Director repository, following the procedure in Section 5.4.4.5.
+  // 5. Download and check the Targets metadata file from the Director repository, following the procedure in
+  // Section 5.4.4.6.
+  if (!director_repo_.updateMeta(*storage_, metadataFetcher)) {
+    LOG_ERROR << "Failed to update director metadata: " << director_repo_.getLastException().what();
+    return false;
   }
-  meta_targets_ = targets;
-  std::vector<Uptane::Target>::const_iterator it;
-  bool target_found = false;
-  for (it = meta_targets_.targets.begin(); it != meta_targets_.targets.end(); ++it) {
-    if (it->IsForSecondary(getSerialResp())) {
-      if (target_found) {
-        detected_attack_ = "Duplicate entry for this ECU";
-        break;
-      }
-      target_found = true;
-      target_ = std_::make_unique<Uptane::Target>(*it);
-    }
+
+  auto targetsForThisEcu = director_repo_.getTargets(getSerial());
+
+  if (targetsForThisEcu.size() != 1) {
+    LOG_ERROR << "Invalid number of targets (should be one): " << targetsForThisEcu.size();
+    return false;
   }
-  storage_->storeRoot(meta_pack.director_root, Uptane::RepositoryType::Director(), Uptane::Version(root_.version()));
-  storage_->storeNonRoot(meta_pack.director_targets, Uptane::RepositoryType::Director(), Uptane::Role::Targets());
+
+  // 6. Download and check the Root metadata file from the Image repository, following the procedure in Section 5.4.4.3.
+  // 7. Download and check the Timestamp metadata file from the Image repository, following the procedure in
+  // Section 5.4.4.4.
+  // 8. Download and check the Snapshot metadata file from the Image repository, following the procedure in
+  // Section 5.4.4.5.
+  // 9. Download and check the top-level Targets metadata file from the Image repository, following the procedure in
+  // Section 5.4.4.6.
+  if (!image_repo_.updateMeta(*storage_, metadataFetcher)) {
+    LOG_ERROR << "Failed to update image metadata: " << image_repo_.getLastException().what();
+    return false;
+  }
+
+  // 10. Verify that Targets metadata from the Director and Image repositories match.
+  if (!(director_repo_.getTargets() == *image_repo_.getTargets())) {
+    LOG_ERROR << "Targets metadata from the Director and Image repositories DOES NOT match ";
+    return false;
+  }
 
   return true;
 }
@@ -113,14 +162,17 @@ bool AktualizrSecondary::putRootResp(const std::string& root, bool director) {
 }
 
 bool AktualizrSecondary::sendFirmwareResp(const std::shared_ptr<std::string>& firmware) {
-  if (target_ == nullptr) {
-    LOG_ERROR << "No valid installation target found";
+  auto targetsForThisEcu = director_repo_.getTargets(getSerial());
+
+  if (targetsForThisEcu.size() != 1) {
+    LOG_ERROR << "Invalid number of targets (should be one): " << targetsForThisEcu.size();
     return false;
   }
+  auto targetToApply = targetsForThisEcu[0];
 
   std::string treehub_server;
 
-  if (target_->IsOstree()) {
+  if (targetToApply.IsOstree()) {
     // this is the ostree specific case
     try {
       std::string ca, cert, pkey, server_url;
@@ -137,9 +189,9 @@ bool AktualizrSecondary::sendFirmwareResp(const std::shared_ptr<std::string>& fi
 
   data::InstallationResult install_res;
 
-  if (target_->IsOstree()) {
+  if (targetToApply.IsOstree()) {
 #ifdef BUILD_OSTREE
-    install_res = OstreeManager::pull(config_.pacman.sysroot, treehub_server, keys_, *target_);
+    install_res = OstreeManager::pull(config_.pacman.sysroot, treehub_server, keys_, targetToApply);
 
     if (install_res.result_code.num_code != data::ResultCode::Numeric::kOk) {
       LOG_ERROR << "Could not pull from OSTree (" << install_res.result_code.toString()
@@ -156,12 +208,12 @@ bool AktualizrSecondary::sendFirmwareResp(const std::shared_ptr<std::string>& fi
     return false;
   }
 
-  install_res = pacman->install(*target_);
+  install_res = pacman->install(targetToApply);
   if (install_res.result_code.num_code != data::ResultCode::Numeric::kOk) {
     LOG_ERROR << "Could not install target (" << install_res.result_code.toString() << "): " << install_res.description;
     return false;
   }
-  storage_->saveInstalledVersion(getSerialResp().ToString(), *target_, InstalledVersionUpdateMode::kCurrent);
+  storage_->saveInstalledVersion(getSerialResp().ToString(), targetToApply, InstalledVersionUpdateMode::kCurrent);
   return true;
 }
 
@@ -199,4 +251,41 @@ void AktualizrSecondary::connectToPrimary() {
   } else {
     LOG_INFO << "Failed to connect to Primary";
   }
+}
+
+bool SecondaryMetadataFetcher::fetchRole(std::string* result, int64_t maxsize, Uptane::RepositoryType repo,
+                                         const Uptane::Role& role, Uptane::Version version) {
+  (void)maxsize;
+  (void)version;
+
+  return getRoleMetadata(result, repo, role);
+}
+
+bool SecondaryMetadataFetcher::fetchLatestRole(std::string* result, int64_t maxsize, Uptane::RepositoryType repo,
+                                               const Uptane::Role& role) {
+  (void)maxsize;
+  return getRoleMetadata(result, repo, role);
+}
+
+bool SecondaryMetadataFetcher::getRoleMetadata(std::string* result, const Uptane::RepositoryType& repo,
+                                               const Uptane::Role& role) {
+  std::unordered_map<std::string, std::string>* metadata_map = nullptr;
+
+  if (repo == Uptane::RepositoryType::Director()) {
+    metadata_map = &director_metadata_;
+  } else if (repo == Uptane::RepositoryType::Image()) {
+    metadata_map = &image_metadata_;
+  }
+
+  if (metadata_map == nullptr) {
+    return false;
+  }
+
+  auto found_meta_it = metadata_map->find(role.ToString());
+  if (found_meta_it == metadata_map->end()) {
+    return false;
+  }
+
+  *result = found_meta_it->second;
+  return true;
 }

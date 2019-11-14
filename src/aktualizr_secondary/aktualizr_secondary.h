@@ -9,9 +9,12 @@
 #include "crypto/keymanager.h"
 #include "socket_server.h"
 #include "storage/invstorage.h"
-#include "uptane/tuf.h"
 #include "utilities/types.h"
 #include "utilities/utils.h"
+
+#include "uptane/directorrepository.h"
+#include "uptane/imagesrepository.h"
+#include "uptane/tuf.h"
 
 class AktualizrSecondary : public AktualizrSecondaryInterface, private AktualizrSecondaryCommon {
  public:
@@ -37,6 +40,8 @@ class AktualizrSecondary : public AktualizrSecondaryInterface, private Aktualizr
 
  private:
   SocketServer socket_server_;
+  Uptane::DirectorRepository director_repo_;
+  Uptane::ImagesRepository image_repo_;
 };
 
 #endif  // AKTUALIZR_SECONDARY_H

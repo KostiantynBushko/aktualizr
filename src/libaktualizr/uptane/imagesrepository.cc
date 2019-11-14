@@ -135,7 +135,7 @@ std::shared_ptr<Uptane::Targets> ImagesRepository::verifyDelegation(const std::s
   return std::shared_ptr<Uptane::Targets>(nullptr);
 }
 
-bool ImagesRepository::updateMeta(INvStorage& storage, Fetcher& fetcher) {
+bool ImagesRepository::updateMeta(INvStorage& storage, IFetcher& fetcher) {
   resetMeta();
   // Load Initial Images Root Metadata
   {

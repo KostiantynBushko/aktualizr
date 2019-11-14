@@ -70,7 +70,7 @@ bool DirectorRepository::checkMetaOffline(INvStorage& storage) {
   return true;
 }
 
-bool DirectorRepository::updateMeta(INvStorage& storage, Fetcher& fetcher) {
+bool DirectorRepository::updateMeta(INvStorage& storage, IFetcher& fetcher) {
   // Uptane step 2 (download time) is not implemented yet.
   // Uptane step 3 (download metadata)
 

@@ -13,12 +13,21 @@ constexpr int64_t kMaxTimestampSize = 64 * 1024;
 constexpr int64_t kMaxSnapshotSize = 64 * 1024;
 constexpr int64_t kMaxImagesTargetsSize = 1024 * 1024;
 
-class Fetcher {
+class IFetcher {
+ public:
+  virtual ~IFetcher() {}
+  virtual bool fetchRole(std::string* result, int64_t maxsize, RepositoryType repo, const Uptane::Role& role,
+                         Version version) = 0;
+  virtual bool fetchLatestRole(std::string* result, int64_t maxsize, RepositoryType repo, const Uptane::Role& role) = 0;
+};
+
+class Fetcher : public IFetcher {
  public:
   Fetcher(const Config& config_in, std::shared_ptr<HttpInterface> http_in)
       : http(std::move(http_in)), config(config_in) {}
-  bool fetchRole(std::string* result, int64_t maxsize, RepositoryType repo, const Uptane::Role& role, Version version);
-  bool fetchLatestRole(std::string* result, int64_t maxsize, RepositoryType repo, const Uptane::Role& role) {
+  virtual bool fetchRole(std::string* result, int64_t maxsize, RepositoryType repo, const Uptane::Role& role,
+                         Version version);
+  virtual bool fetchLatestRole(std::string* result, int64_t maxsize, RepositoryType repo, const Uptane::Role& role) {
     return fetchRole(result, maxsize, repo, role, Version());
   }
 
