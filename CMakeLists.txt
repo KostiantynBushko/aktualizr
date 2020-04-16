@@ -18,6 +18,10 @@ else()
     set(TESTSUITE_VALGRIND_DEFAULT OFF)
 endif()
 
+if(${CMAKE_BUILD_TYPE} MATCHES "Debug" OR ${CMAKE_BUILD_TYPE} MATCHES "Valgrind")   
+    add_definitions(-DDEBUG)
+endif()
+
 option(WARNING_AS_ERROR "Treat warnings as errors" ON)
 option(PEDANTIC_WARNINGS "Compile with pedantic warnings" OFF)
 option(BUILD_WITH_CODE_COVERAGE "Enable gcov code coverage" OFF)

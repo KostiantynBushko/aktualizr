@@ -14,6 +14,10 @@
 #include "utilities/sig_handler.h"
 #include "utilities/utils.h"
 
+#ifdef DEBUG
+#include "utilities/fault_injection.h"
+#endif
+
 namespace bpo = boost::program_options;
 
 void checkInfoOptions(const bpo::options_description &description, const bpo::variables_map &vm) {
@@ -45,6 +49,10 @@ bpo::variables_map parseOptions(int argc, char *argv[]) {
       ("primary-ecu-hardware-id", bpo::value<std::string>(), "hardware ID of Primary ECU")
       ("secondary-config-file", bpo::value<boost::filesystem::path>(), "secondary ECUs configuration file")
       ("campaign-id", bpo::value<std::string>(), "ID of the campaign to act on");
+#ifdef DEBUG 
+  description.add_options()
+      ("sec-inst-fault", bpo::value<std::string>(), "(ECU serial ID) Emulate installation fault for the secondary ECU");
+#endif
   // clang-format on
 
   // consider the first positional argument as the aktualizr run mode
@@ -107,6 +115,15 @@ int main(int argc, char *argv[]) {
   logger_set_threshold(boost::log::trivial::info);
 
   bpo::variables_map commandline_map = parseOptions(argc, argv);
+
+#ifdef DEBUG
+  if (commandline_map.count("sec-inst-fault") != 0) {
+    auto ecu_serial_id = commandline_map["sec-inst-fault"].as<std::string>();
+    fault_injection_init();
+    std::string str("secondary_install_" + ecu_serial_id);
+    fiu_enable(str.c_str(), 1, nullptr, 0);
+  }
+#endif
 
   LOG_INFO << "Aktualizr version " << aktualizr_version() << " starting";
 
